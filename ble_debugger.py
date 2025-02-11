@@ -12,7 +12,7 @@ if sys.platform == 'win32':
 class BLEApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("BLE调试工具 v3.1")
+        self.root.title("BLE调试工具 v3.2")
         self.client = None
         self.selected_device = None
         self.scanning = False
@@ -24,7 +24,6 @@ class BLEApp:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
 
-        # 初始化UI
         self.setup_ui()
         self.setup_style()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -175,28 +174,90 @@ class BLEApp:
             self.selected_device = self.device_list.item(selected[0])['values'][1]
             self.btn_connect.config(state=tk.NORMAL)
 
+    def toggle_connection(self):
+        """切换连接状态"""
+        if self.client and self.client.is_connected:
+            self.loop.call_soon_threadsafe(asyncio.create_task, self.disconnect())
+        else:
+            self.loop.call_soon_threadsafe(asyncio.create_task, self.connect())
+
     async def connect(self):
         """建立连接"""
         try:
             self.client = BleakClient(self.selected_device)
             await self.client.connect()
-
             self.btn_connect.config(text="断开连接", style='Red.TButton')
             self.btn_send.config(state=tk.NORMAL)
             self.char_entry.config(state=tk.DISABLED)
-            self.show_system_msg(f"已连接到 {self.selected_device}")
+            self.show_system_msg(f"已连接: {self.selected_device}")
             
-            # 启用通知
+            # 启用通知（修正后的正确语法）
             await self.client.start_notify(
                 self.char_entry.get(),
                 lambda _, data: self.show_data(data)
-            )
-            
+            )  # 确保括号闭合
+
         except Exception as e:
             self.show_system_msg(f"连接失败: {str(e)}")
             self.btn_connect.config(text="连接设备", style='Connect.TButton')
 
-    # ...（其他方法保持不变，完整代码请复制全部内容）
+    async def disconnect(self):
+        """断开连接"""
+        try:
+            await self.client.stop_notify(self.char_entry.get())
+            await self.client.disconnect()
+            self.show_system_msg("连接已断开")
+        except Exception as e:
+            self.show_system_msg(f"断开错误: {str(e)}")
+        finally:
+            self.btn_connect.config(text="连接设备", style='Connect.TButton')
+            self.btn_send.config(state=tk.DISABLED)
+            self.char_entry.config(state=tk.NORMAL)
+
+    def send_data(self):
+        """发送数据"""
+        data = self.tx_entry.get().strip()
+        if not data:
+            return
+
+        async def _send():
+            try:
+                # 自动检测数据格式
+                if all(c in "0123456789abcdefABCDEF " for c in data):
+                    send_bytes = bytes.fromhex(data.replace(" ", ""))
+                else:
+                    send_bytes = data.encode('utf-8')
+                
+                await self.client.write_gatt_char(
+                    self.char_entry.get(),
+                    send_bytes
+                )
+                self.tx_entry.delete(0, tk.END)
+                self.show_system_msg(f"已发送: {send_bytes.hex(' ').upper()}")
+                
+            except Exception as e:
+                self.show_system_msg(f"发送失败: {str(e)}")
+
+        self.loop.call_soon_threadsafe(asyncio.create_task, _send())
+
+    def show_data(self, data):
+        """显示接收到的数据"""
+        hex_str = ' '.join(f"{b:02X}" for b in data)
+        timestamp = asyncio.get_event_loop().time()
+        self.rx_text.insert(tk.END, f"[{timestamp:.2f}] RX: {hex_str}\n")
+        self.rx_text.see(tk.END)
+
+    def show_system_msg(self, msg):
+        """显示系统消息"""
+        self.rx_text.insert(tk.END, f"[系统] {msg}\n", 'system')
+        self.rx_text.see(tk.END)
+
+    def on_closing(self):
+        """关闭窗口时的清理操作"""
+        if self.client and self.client.is_connected:
+            self.loop.run_until_complete(self.disconnect())
+        self.loop.close()
+        self.root.destroy()
 
 if __name__ == "__main__":
     root = tk.Tk()

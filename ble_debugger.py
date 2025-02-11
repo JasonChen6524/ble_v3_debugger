@@ -5,14 +5,14 @@ from tkinter import ttk, scrolledtext, messagebox
 from bleak import BleakScanner, BleakClient
 from bleak.exc import BleakError
 
-# 设置Windows事件循环策略
+# Windows事件循环策略设置
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 class BLEApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("BLE调试工具 v3.2")
+        self.root.title("BLE调试工具 v3.4")
         self.client = None
         self.selected_device = None
         self.scanning = False
@@ -28,9 +28,9 @@ class BLEApp:
         self.setup_style()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
-        # Linux权限提示
-        if sys.platform.startswith('linux'):
-            self.show_system_msg("提示：Linux系统可能需要运行'sudo setcap cap_net_raw,cap_net_admin+eip $(readlink -f $(which python3))'")
+        # Windows特定提示
+        if sys.platform == 'win32':
+            self.show_system_msg("提示：请确保已启用蓝牙LE扫描支持")
 
     def setup_style(self):
         """初始化界面样式"""
@@ -68,16 +68,16 @@ class BLEApp:
             scan_frame,
             columns=('name', 'address', 'rssi'),
             show='headings',
-            height=6
+            height=8
         )
         self.device_list.heading('name', text='设备名称')
         self.device_list.heading('address', text='MAC地址')
         self.device_list.heading('rssi', text='信号强度')
-        self.device_list.column('name', width=150)
-        self.device_list.column('address', width=180)
+        self.device_list.column('name', width=180)
+        self.device_list.column('address', width=200)
         self.device_list.column('rssi', width=80, anchor=tk.CENTER)
         self.device_list.pack(fill=tk.X, padx=5, pady=5)
-        self.device_list.bind('<<TreeviewSelect>>', self.select_device)
+        self.device_list.bind('<<TreeviewSelect>>', self.select_device)  # 关键绑定
 
         # 连接控制区域
         conn_frame = ttk.LabelFrame(main_frame, text="连接控制")
@@ -124,31 +124,41 @@ class BLEApp:
         )
         self.btn_send.pack(side=tk.RIGHT, padx=5)
 
+    # 新增关键方法 ----------------------------
+    def select_device(self, event):
+        """设备选择事件处理"""
+        selected = self.device_list.selection()
+        if selected:
+            self.selected_device = self.device_list.item(selected[0])['values'][1]
+            self.btn_connect.config(state=tk.NORMAL)
+            self.show_system_msg(f"已选择设备: {self.selected_device}")
+
+    # ----------------------------------------
+
     def start_scan(self):
-        """启动设备扫描"""
+        """启动增强扫描"""
         async def _scan():
             self.scanning = True
             self.btn_scan.config(state=tk.DISABLED, text="扫描中...")
             self.device_list.delete(*self.device_list.get_children())
-            self.show_system_msg("正在扫描BLE设备（约5秒）...")
+            self.show_system_msg("正在深度扫描BLE设备（约10秒）...")
             
             try:
-                async with BleakScanner() as scanner:
-                    await asyncio.sleep(5.0)  # 扫描持续时间
+                async with BleakScanner(
+                    detection_callback=self._detection_callback,
+                    service_uuids=None,
+                    scanning_mode="passive"
+                ) as scanner:
+                    await asyncio.sleep(10.0)
                     devices = await scanner.get_discovered_devices()
                     
-                    # 更新设备列表
+                    # 强制刷新设备列表
                     for d in devices:
                         self.root.after(0, self._insert_device, 
-                            d.name or "Unknown",
+                            d.name,
                             d.address,
-                            d.rssi or "N/A"
+                            d.rssi
                         )
-                    
-                    self.show_system_msg(f"发现 {len(devices)} 个设备")
-                    print("调试信息 - 发现设备:")  # 终端输出用于调试
-                    for d in devices:
-                        print(f"  {d.address} | {d.name or 'Unknown'} | RSSI: {d.rssi}")
 
             except Exception as e:
                 self.show_system_msg(f"扫描失败: {str(e)}")
@@ -159,20 +169,43 @@ class BLEApp:
 
         self.loop.create_task(_scan())
 
+    def _detection_callback(self, device, advertisement_data):
+        """实时设备发现回调"""
+        try:
+            name = device.name or "Unknown"
+            mac = device.address
+            rssi = advertisement_data.rssi if advertisement_data else "N/A"
+            
+            # 终端调试输出
+            print(f"发现设备: {mac} | {name} | RSSI: {rssi}")
+            print(f"  广播数据: {advertisement_data}")
+            
+            # 立即更新UI
+            self.root.after(0, self._insert_device, name, mac, rssi)
+        except Exception as e:
+            print(f"设备处理错误: {str(e)}")
+
     def _insert_device(self, name, address, rssi):
         """安全插入设备到列表"""
-        filter_text = self.filter_entry.get().lower()
-        if filter_text:
-            if filter_text not in name.lower() and filter_text not in address.lower():
-                return
-        self.device_list.insert('', tk.END, values=(name, address, rssi))
-
-    def select_device(self, event):
-        """选择设备"""
-        selected = self.device_list.selection()
-        if selected:
-            self.selected_device = self.device_list.item(selected[0])['values'][1]
-            self.btn_connect.config(state=tk.NORMAL)
+        try:
+            # 清理设备名称
+            clean_name = name.encode('ascii', 'ignore').decode().strip() if name else "Unknown"
+            if not clean_name:
+                clean_name = "Unknown"
+                
+            # 应用过滤条件
+            filter_text = self.filter_entry.get().lower()
+            if filter_text:
+                if filter_text not in clean_name.lower() and filter_text not in address.lower():
+                    return
+                    
+            # 插入或更新设备
+            existing = [self.device_list.item(i)['values'] for i in self.device_list.get_children()]
+            if (clean_name, address, rssi) not in existing:
+                self.device_list.insert('', tk.END, values=(clean_name, address, rssi))
+                
+        except Exception as e:
+            print(f"插入设备错误: {str(e)}")
 
     def toggle_connection(self):
         """切换连接状态"""
@@ -191,11 +224,11 @@ class BLEApp:
             self.char_entry.config(state=tk.DISABLED)
             self.show_system_msg(f"已连接: {self.selected_device}")
             
-            # 启用通知（修正后的正确语法）
+            # 启用通知
             await self.client.start_notify(
                 self.char_entry.get(),
                 lambda _, data: self.show_data(data)
-            )  # 确保括号闭合
+            )
 
         except Exception as e:
             self.show_system_msg(f"连接失败: {str(e)}")
